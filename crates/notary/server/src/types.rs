@@ -1,8 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 use tlsn_core::CryptoProvider;
 use tokio::sync::Semaphore;
 
@@ -29,8 +26,12 @@ pub struct InfoResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotarizationRequestQuery {
-    /// Session id that is returned from /session API
-    pub session_id: String,
+    /// Type of client (tcp or websocket)
+    pub client_type: String,
+    /// Maximum data that can be sent by the prover (optional)
+    pub max_sent_data: Option<usize>,
+    /// Maximum data that can be received by the prover (optional)
+    pub max_recv_data: Option<usize>,
 }
 
 /// Global data that needs to be shared with the axum handlers
@@ -38,8 +39,6 @@ pub struct NotarizationRequestQuery {
 pub struct NotaryGlobals {
     pub crypto_provider: Arc<CryptoProvider>,
     pub notarization_config: NotarizationProperties,
-    /// A temporary storage to store session_id
-    pub store: Arc<Mutex<HashMap<String, ()>>>,
     /// Selected authorization mode if any
     pub authorization_mode: Option<AuthorizationMode>,
     /// A semaphore to acquire a permit for notarization
@@ -56,7 +55,6 @@ impl NotaryGlobals {
         Self {
             crypto_provider,
             notarization_config,
-            store: Default::default(),
             authorization_mode,
             semaphore,
         }

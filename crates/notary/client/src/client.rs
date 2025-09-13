@@ -3,7 +3,7 @@
 //! This module sets up connection to notary server via TCP or TLS for
 //! subsequent requests for notarization.
 
-use http_body_util::{BodyExt as _, Either, Empty, Full};
+use http_body_util::Empty;
 use hyper::{
     body::{Bytes, Incoming},
     client::conn::http1::Parts,
@@ -11,9 +11,7 @@ use hyper::{
     Request, Response, StatusCode,
 };
 use hyper_util::rt::TokioIo;
-use notary_common::{
-    ClientType, NotarizationSessionRequest, NotarizationSessionResponse, X_API_KEY_HEADER,
-};
+use notary_common::X_API_KEY_HEADER;
 use std::{
     io::Error as IoError,
     pin::Pin,
@@ -54,8 +52,6 @@ impl NotarizationRequest {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Accepted {
-    /// Session identifier.
-    pub id: String,
     /// Connection to the notary server to be used by a prover.
     pub io: NotaryConnection,
 }
@@ -214,8 +210,7 @@ impl NotaryClient {
 
             self.send_request(notary_tls_socket, notarization_request)
                 .await
-                .map(|(connection, session_id)| Accepted {
-                    id: session_id,
+                .map(|connection| Accepted {
                     io: NotaryConnection::Tls(connection),
                 })
         } else {
@@ -223,8 +218,7 @@ impl NotaryClient {
 
             self.send_request(notary_socket, notarization_request)
                 .await
-                .map(|(connection, session_id)| Accepted {
-                    id: session_id,
+                .map(|connection| Accepted {
                     io: NotaryConnection::Tcp(connection),
                 })
         }
@@ -235,7 +229,7 @@ impl NotaryClient {
         &self,
         notary_socket: S,
         notarization_request: NotarizationRequest,
-    ) -> Result<(S, String), ClientError> {
+    ) -> Result<S, ClientError> {
         let http_scheme = if self.tls { "https" } else { "http" };
         let path_prefix = if self.path_prefix.is_empty() {
             String::new()
@@ -244,7 +238,7 @@ impl NotaryClient {
         };
 
         // Attach the hyper HTTP client to the notary connection to send request to the
-        // /session endpoint to configure notarization and obtain session id.
+        // /notarize endpoint directly with parameters.
         let (mut notary_request_sender, notary_connection) =
             hyper::client::conn::http1::handshake(TokioIo::new(notary_socket))
                 .await
@@ -267,119 +261,45 @@ impl NotaryClient {
             Ok(notary_socket)
         };
 
-        // Create a future to send configuration and notarization requests to the notary
+        // Create a future to send notarization request to the notary
         // server using the connection established above.
         let client_requests_fut = async {
-            // Build the HTTP request to configure notarization.
-            let configuration_request_payload =
-                serde_json::to_string(&NotarizationSessionRequest {
-                    client_type: ClientType::Tcp,
-                    max_sent_data: Some(notarization_request.max_sent_data),
-                    max_recv_data: Some(notarization_request.max_recv_data),
-                })
-                .map_err(|err| {
-                    error!("Failed to serialise http request for configuration");
-                    ClientError::new(ErrorKind::Internal, Some(Box::new(err)))
-                })?;
-
-            let mut configuration_request_builder = Request::builder()
-                .uri(format!(
-                    "{http_scheme}://{}:{}{}/session",
-                    self.host, self.port, path_prefix
-                ))
-                .method("POST")
-                .header("Host", &self.host)
-                // Need to specify application/json for axum to parse it as json.
-                .header("Content-Type", "application/json");
-
-            if let Some(api_key) = &self.api_key {
-                configuration_request_builder =
-                    configuration_request_builder.header(X_API_KEY_HEADER, api_key);
-            }
-
-            if let Some(jwt) = &self.jwt {
-                configuration_request_builder =
-                    configuration_request_builder.header(AUTHORIZATION, format!("Bearer {jwt}"));
-            }
-
-            let configuration_request = configuration_request_builder
-                .body(Either::Left(Full::new(Bytes::from(
-                    configuration_request_payload,
-                ))))
-                .map_err(|err| {
-                    error!("Failed to build http request for configuration");
-                    ClientError::new(ErrorKind::Internal, Some(Box::new(err)))
-                })?;
-
-            debug!("Sending configuration request: {:?}", configuration_request);
-
-            let configuration_response = notary_request_sender
-                .send_request(configuration_request)
-                .await
-                .map_err(|err| {
-                    error!("Failed to send http request for configuration");
-                    ClientError::new(ErrorKind::Http, Some(Box::new(err)))
-                })?;
-
-            debug!("Sent configuration request");
-
-            if configuration_response.status() != StatusCode::OK {
-                return Err(ClientError::new(
-                    ErrorKind::Configuration,
-                    Some(
-                        format!(
-                            "Configuration response status is not OK: {:?}",
-                            configuration_response
-                        )
-                        .into(),
-                    ),
-                ));
-            }
-
-            let configuration_response_payload = configuration_response
-                .into_body()
-                .collect()
-                .await
-                .map_err(|err| {
-                    error!("Failed to parse configuration response");
-                    ClientError::new(ErrorKind::Http, Some(Box::new(err)))
-                })?
-                .to_bytes();
-
-            let configuration_response_payload_parsed =
-                serde_json::from_str::<NotarizationSessionResponse>(&String::from_utf8_lossy(
-                    &configuration_response_payload,
-                ))
-                .map_err(|err| {
-                    error!("Failed to parse configuration response payload");
-                    ClientError::new(ErrorKind::Internal, Some(Box::new(err)))
-                })?;
-
-            debug!(
-                "Configuration response: {:?}",
-                configuration_response_payload_parsed
+            // Build query parameters for the notarization request
+            let query_params = format!(
+                "clientType=tcp&maxSentData={}&maxRecvData={}",
+                notarization_request.max_sent_data,
+                notarization_request.max_recv_data
             );
 
             // Send notarization request via HTTP, where the underlying TCP/TLS connection
             // will be extracted later.
-            let notarization_request = Request::builder()
-                // Need to specify the session_id so that notary server knows the right
-                // configuration to use as the configuration is set in the previous
-                // HTTP call.
+            let mut notarization_request_builder = Request::builder()
                 .uri(format!(
-                    "{http_scheme}://{}:{}{}/notarize?sessionId={}",
+                    "{http_scheme}://{}:{}{}/notarize?{}",
                     self.host,
                     self.port,
                     path_prefix,
-                    &configuration_response_payload_parsed.session_id
+                    query_params
                 ))
                 .method("GET")
                 .header("Host", &self.host)
                 .header("Connection", "Upgrade")
                 // Need to specify this upgrade header for server to extract TCP/TLS connection
                 // later.
-                .header("Upgrade", "TCP")
-                .body(Either::Right(Empty::<Bytes>::new()))
+                .header("Upgrade", "TCP");
+
+            if let Some(api_key) = &self.api_key {
+                notarization_request_builder =
+                    notarization_request_builder.header(X_API_KEY_HEADER, api_key);
+            }
+
+            if let Some(jwt) = &self.jwt {
+                notarization_request_builder =
+                    notarization_request_builder.header(AUTHORIZATION, format!("Bearer {jwt}"));
+            }
+
+            let notarization_request = notarization_request_builder
+                .body(Empty::<Bytes>::new())
                 .map_err(|err| {
                     error!("Failed to build http request for notarization");
                     ClientError::new(ErrorKind::Internal, Some(Box::new(err)))
@@ -451,15 +371,14 @@ impl NotaryClient {
                 ));
             }
 
-            Ok(configuration_response_payload_parsed.session_id)
+            Ok(())
         };
 
-        // Poll both futures simultaneously to obtain the resulting socket and
-        // session_id.
-        let (notary_socket, session_id) =
+        // Poll both futures simultaneously to obtain the resulting socket.
+        let (notary_socket, _) =
             futures::try_join!(notary_connection_fut, client_requests_fut)?;
 
-        Ok((notary_socket.into_inner(), session_id))
+        Ok(notary_socket.into_inner())
     }
 
     /// Sets notarization request timeout duration in seconds.

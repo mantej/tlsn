@@ -83,21 +83,18 @@ impl TcpUpgrade {
 pub async fn tcp_notarize(
     stream: TokioIo<Upgraded>,
     notary_globals: NotaryGlobals,
-    session_id: String,
 ) {
     let start = Instant::now();
-    debug!(?session_id, "Upgraded to tcp connection");
-    match notary_service(stream, notary_globals, &session_id).await {
+    debug!("Upgraded to tcp connection");
+    match notary_service(stream, notary_globals).await {
         Ok(_) => {
             info!(
-                ?session_id,
                 elapsed_time_millis = start.elapsed().as_millis(),
                 "Successful notarization using tcp!"
             );
         }
         Err(err) => {
             error!(
-                ?session_id,
                 elapsed_time_millis = start.elapsed().as_millis(),
                 "Failed notarization using tcp: {err}"
             );

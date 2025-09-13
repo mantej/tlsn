@@ -3,7 +3,7 @@ use eyre::{eyre, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::{parse_config_file, util::prepend_file_path, CliFields};
+use crate::{parse_config_file, util::prepend_file_path, CliFields, security::ProxyValidationConfig};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NotaryServerProperties {
@@ -23,6 +23,8 @@ pub struct NotaryServerProperties {
     pub log: LogProperties,
     /// Setting for authorization
     pub auth: AuthorizationProperties,
+    /// Setting for WebSocket proxy
+    pub proxy: ProxyProperties,
 }
 
 impl NotaryServerProperties {
@@ -185,6 +187,26 @@ pub struct JwtClaim {
     pub values: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProxyProperties {
+    /// Flag to enable/disable WebSocket proxy functionality
+    pub enabled: bool,
+    /// Path prefix for proxy endpoints
+    pub path_prefix: String,
+    /// Proxy validation configuration
+    pub validation: ProxyValidationConfig,
+}
+
+impl Default for ProxyProperties {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path_prefix: "/proxy".to_string(),
+            validation: ProxyValidationConfig::default(),
+        }
+    }
+}
+
 impl Default for NotaryServerProperties {
     fn default() -> Self {
         Self {
@@ -217,6 +239,7 @@ impl Default for NotaryServerProperties {
             tls: Default::default(),
             log: Default::default(),
             auth: Default::default(),
+            proxy: Default::default(),
         }
     }
 }

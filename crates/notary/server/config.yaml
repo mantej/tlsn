@@ -1,0 +1,53 @@
+host: "0.0.0.0"
+port: 7047
+html_info: |
+  <head>
+    <meta charset="UTF-8">
+    <meta name="author" content="tlsnotary">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body>
+    <h1>TLSNotary Local Server {version}!</h1>
+    <ul>
+      <li>public key: <pre>{public_key}</pre></li>
+      <li>git commit hash: <a href="https://github.com/tlsnotary/tlsn/commit/{git_commit_hash}">{git_commit_hash}</a></li>
+      <li><a href="healthcheck">health check</a></li>
+      <li><a href="info">info</a></li>
+    </ul>
+  </body>
+concurrency: 32
+
+notarization:
+  max_sent_data: 8192
+  max_recv_data: 32768
+  timeout: 1800
+  signature_algorithm: secp256k1
+  allow_extensions: false
+
+tls:
+  enabled: false
+
+log:
+  level: DEBUG
+  format: COMPACT
+
+auth:
+  enabled: false
+
+proxy:
+  enabled: true
+  path_prefix: "/proxy"
+  validation:
+    enabled: true
+    mode: allowlist
+    allowed_hosts:
+      - "raw.githubusercontent.com"
+      - "api.github.com" 
+      - "httpbin.org"
+      - "reddit.com"
+      - "api.reddit.com"
+      - "oauth.reddit.com"
+    blocked_hosts: []
+    allowed_ports: [443, 80]
+    allow_localhost: false
+    allow_private_ips: false

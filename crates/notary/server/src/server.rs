@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     middleware::from_extractor_with_state,
     response::{Html, IntoResponse},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
 use eyre::{ensure, eyre, Result};
@@ -32,7 +32,9 @@ use crate::{
     config::{NotarizationProperties, NotaryServerProperties},
     error::NotaryServerError,
     middleware::AuthorizationMiddleware,
-    service::{initialize, upgrade_protocol},
+    routes::{websocket_proxy, proxy_health, proxy_info},
+    security::ProxyValidator,
+    service::upgrade_protocol,
     signing::AttestationKey,
     types::{InfoResponse, NotaryGlobals},
 };
@@ -112,6 +114,8 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
     info!("Listening for TCP traffic at {}", notary_address);
 
     let protocol = Arc::new(http1::Builder::new());
+    let proxy_validator = Arc::new(ProxyValidator::new(config.proxy.validation.clone()));
+    
     let notary_globals = NotaryGlobals::new(
         Arc::new(crypto_provider),
         config.notarization.clone(),
@@ -157,9 +161,7 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
                     .into_response()
             }),
         )
-        .route("/session", post(initialize))
-        // Not applying auth middleware to /notarize endpoint for now as we can rely on our
-        // short-lived session id generated from /session endpoint, as it is not possible
+        // Apply auth middleware to /notarize endpoint if authorization is enabled
         // to use header for API key for websocket /notarize endpoint due to browser restriction
         // ref: https://stackoverflow.com/a/4361358; And putting it in url query param
         // seems to be more insecured: https://stackoverflow.com/questions/5517281/place-api-key-in-headers-or-url
@@ -167,7 +169,29 @@ pub async fn run_server(config: &NotaryServerProperties) -> Result<(), NotarySer
             AuthorizationMiddleware,
             NotaryGlobals,
         >(notary_globals.clone()))
-        .route("/notarize", get(upgrade_protocol))
+        .route("/notarize", get(upgrade_protocol));
+
+    // Add proxy routes if enabled
+    let router = if config.proxy.enabled {
+        let proxy_path_prefix = &config.proxy.path_prefix;
+        router
+            .route(
+                &format!("{}", proxy_path_prefix),
+                get(websocket_proxy).with_state(proxy_validator.clone())
+            )
+            .route(
+                &format!("{}/health", proxy_path_prefix),
+                get(proxy_health)
+            )
+            .route(
+                &format!("{}/info", proxy_path_prefix),
+                get(proxy_info).with_state(proxy_validator.clone())
+            )
+    } else {
+        router
+    };
+
+    let router = router
         .layer(CorsLayer::permissive())
         .with_state(notary_globals);
 

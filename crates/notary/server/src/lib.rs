@@ -3,6 +3,8 @@ mod cli;
 mod config;
 mod error;
 mod middleware;
+mod routes;
+mod security;
 mod server;
 mod server_tracing;
 mod service;

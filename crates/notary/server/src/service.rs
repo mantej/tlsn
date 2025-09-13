@@ -4,13 +4,11 @@ pub mod websocket;
 
 use axum::{
     body::Body,
-    extract::{rejection::JsonRejection, FromRequestParts, Query, State},
+    extract::{FromRequestParts, Query, State},
     http::{header, request::Parts, StatusCode},
-    response::{IntoResponse, Json, Response},
+    response::{IntoResponse, Response},
 };
-use axum_macros::debug_handler;
 use eyre::eyre;
-use notary_common::{NotarizationSessionRequest, NotarizationSessionResponse};
 use std::time::Duration;
 use tlsn_common::config::ProtocolConfigValidator;
 use tlsn_core::attestation::AttestationConfig;
@@ -20,8 +18,7 @@ use tokio::{
     time::timeout,
 };
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use tracing::{debug, error, info, trace};
-use uuid::Uuid;
+use tracing::{debug, error, info};
 
 use crate::{
     error::NotaryServerError,
@@ -69,9 +66,8 @@ where
 }
 
 /// Handler to upgrade protocol from http to either websocket or underlying tcp
-/// depending on the type of client the session_id parameter is also extracted
-/// here to fetch the configuration parameters that have been submitted in the
-/// previous request to /session made by the same client
+/// depending on the type of client. Parameters are now passed directly in the
+/// query string instead of using a session.
 pub async fn upgrade_protocol(
     protocol_upgrade: ProtocolUpgrade,
     State(notary_globals): State<NotaryGlobals>,
@@ -89,114 +85,49 @@ pub async fn upgrade_protocol(
     };
 
     info!("Received upgrade protocol request");
-    let session_id = params.session_id;
-    // Check if session_id exists in the store, this also removes session_id from
-    // the store as each session_id can only be used once
-    if notary_globals
-        .store
-        .lock()
-        .unwrap()
-        .remove(&session_id)
-        .is_none()
-    {
-        let err_msg = format!("Session id {} does not exist", session_id);
-        error!(err_msg);
-        return NotaryServerError::BadProverRequest(err_msg).into_response();
-    };
+    
+    // Validate max_sent_data and max_recv_data against global limits
+    if let Some(max_sent) = params.max_sent_data {
+        if max_sent > notary_globals.notarization_config.max_sent_data {
+            let err_msg = format!(
+                "Max sent data requested {} exceeds the global maximum threshold {}",
+                max_sent, notary_globals.notarization_config.max_sent_data
+            );
+            error!(err_msg);
+            return NotaryServerError::BadProverRequest(err_msg).into_response();
+        }
+    }
+    
+    if let Some(max_recv) = params.max_recv_data {
+        if max_recv > notary_globals.notarization_config.max_recv_data {
+            let err_msg = format!(
+                "Max recv data requested {} exceeds the global maximum threshold {}",
+                max_recv, notary_globals.notarization_config.max_recv_data
+            );
+            error!(err_msg);
+            return NotaryServerError::BadProverRequest(err_msg).into_response();
+        }
+    }
     // This completes the HTTP Upgrade request and returns a successful response to
     // the client, meanwhile initiating the websocket or tcp connection
     match protocol_upgrade {
         ProtocolUpgrade::Ws(ws) => ws.on_upgrade(move |socket| async move {
-            websocket_notarize(socket, notary_globals, session_id).await;
+            websocket_notarize(socket, notary_globals).await;
             drop(permit);
         }),
         ProtocolUpgrade::Tcp(tcp) => tcp.on_upgrade(move |stream| async move {
-            tcp_notarize(stream, notary_globals, session_id).await;
+            tcp_notarize(stream, notary_globals).await;
             drop(permit);
         }),
     }
-}
-
-/// Handler to initialize and configure notarization for both TCP and WebSocket
-/// clients
-#[debug_handler(state = NotaryGlobals)]
-pub async fn initialize(
-    State(notary_globals): State<NotaryGlobals>,
-    payload: Result<Json<NotarizationSessionRequest>, JsonRejection>,
-) -> impl IntoResponse {
-    info!(
-        ?payload,
-        "Received request for initializing a notarization session"
-    );
-
-    // Parse the body payload
-    let payload = match payload {
-        Ok(payload) => payload,
-        Err(err) => {
-            error!("Malformed payload submitted for initializing notarization: {err}");
-            return NotaryServerError::BadProverRequest(err.to_string()).into_response();
-        }
-    };
-
-    // Ensure that the max_sent_data, max_recv_data submitted is not larger than the
-    // global max limits configured in notary server
-    if payload.max_sent_data.is_some() || payload.max_recv_data.is_some() {
-        if payload.max_sent_data.unwrap_or_default()
-            > notary_globals.notarization_config.max_sent_data
-        {
-            error!(
-                "Max sent data requested {:?} exceeds the global maximum threshold {:?}",
-                payload.max_sent_data.unwrap_or_default(),
-                notary_globals.notarization_config.max_sent_data
-            );
-            return NotaryServerError::BadProverRequest(
-                "Max sent data requested exceeds the global maximum threshold".to_string(),
-            )
-            .into_response();
-        }
-        if payload.max_recv_data.unwrap_or_default()
-            > notary_globals.notarization_config.max_recv_data
-        {
-            error!(
-                "Max recv data requested {:?} exceeds the global maximum threshold {:?}",
-                payload.max_recv_data.unwrap_or_default(),
-                notary_globals.notarization_config.max_recv_data
-            );
-            return NotaryServerError::BadProverRequest(
-                "Max recv data requested exceeds the global maximum threshold".to_string(),
-            )
-            .into_response();
-        }
-    }
-
-    let prover_session_id = Uuid::new_v4().to_string();
-
-    // Store the configuration data in a temporary store
-    notary_globals
-        .store
-        .lock()
-        .unwrap()
-        .insert(prover_session_id.clone(), ());
-
-    trace!("Latest store state: {:?}", notary_globals.store);
-
-    // Return the session id in the response to the client
-    (
-        StatusCode::OK,
-        Json(NotarizationSessionResponse {
-            session_id: prover_session_id,
-        }),
-    )
-        .into_response()
 }
 
 /// Run the notarization
 pub async fn notary_service<T: AsyncWrite + AsyncRead + Send + Unpin + 'static>(
     socket: T,
     notary_globals: NotaryGlobals,
-    session_id: &str,
 ) -> Result<(), NotaryServerError> {
-    debug!(?session_id, "Starting notarization...");
+    debug!("Starting notarization...");
 
     let crypto_provider = notary_globals.crypto_provider.clone();
 
